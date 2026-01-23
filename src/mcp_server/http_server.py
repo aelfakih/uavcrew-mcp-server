@@ -6,6 +6,7 @@ allowing the compliance service to call MCP servers over the network.
 
 import json
 import os
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Header, Request
@@ -22,11 +23,22 @@ from .tools.file_metadata import get_file_metadata
 from .database import get_db, seed_demo_data
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup/shutdown."""
+    # Startup
+    if os.environ.get("SEED_DEMO_DATA", "true").lower() == "true":
+        seed_demo_data()
+    yield
+    # Shutdown (nothing to do)
+
+
 # Create FastAPI app
 app = FastAPI(
     title="UAVCrew Compliance MCP Server",
     description="HTTP interface for MCP tools",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -65,13 +77,6 @@ def verify_auth(authorization: str | None) -> bool:
         token = authorization
 
     return token == MCP_API_KEY
-
-
-@app.on_event("startup")
-async def startup():
-    """Initialize on startup."""
-    if os.environ.get("SEED_DEMO_DATA", "true").lower() == "true":
-        seed_demo_data()
 
 
 @app.get("/health")

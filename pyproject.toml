@@ -15,6 +15,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Database drivers - install the one(s) you need
+postgresql = ["psycopg2-binary>=2.9.0"]
+mysql = ["pymysql>=1.1.0"]
+sqlserver = ["pyodbc>=5.0.0"]
+oracle = ["oracledb>=2.0.0"]
+# All databases
+all-databases = [
+    "psycopg2-binary>=2.9.0",
+    "pymysql>=1.1.0",
+    "pyodbc>=5.0.0",
+    "oracledb>=2.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

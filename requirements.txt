@@ -1,0 +1,17 @@
+# UAVCrew MCP Server Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+mcp>=1.0.0
+pydantic>=2.5.0
+sqlalchemy>=2.0.0
+python-dotenv>=1.0.0
+fastapi>=0.109.0
+uvicorn>=0.27.0
+httpx>=0.26.0
+
+# Database drivers (install the one you need)
+# pip install psycopg2-binary  # PostgreSQL
+# pip install pymysql          # MySQL/MariaDB
+# pip install pyodbc           # SQL Server
+# pip install oracledb         # Oracle

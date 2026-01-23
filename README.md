@@ -12,7 +12,7 @@ This MCP server runs in **your infrastructure** and provides secure, real-time a
 │                                                                 │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
 │  │ Flight Logs  │    │  Database    │    │  MCP Server  │      │
-│  │ (.bin files) │───▶│  PostgreSQL  │◀───│  Port 8200   │◀─────┼──── UAVCrew AI
+│  │ (.bin files) │───▶│ Your DB      │◀───│  Port 8200   │◀─────┼──── UAVCrew AI
 │  └──────────────┘    └──────────────┘    └──────────────┘      │     (calls your
 │                                                                 │      MCP server)
 └─────────────────────────────────────────────────────────────────┘
@@ -22,13 +22,32 @@ This MCP server runs in **your infrastructure** and provides secure, real-time a
 
 ---
 
+## Prerequisites
+
+Before setting up the MCP server, you need a UAVCrew account:
+
+1. **Log in** to your UAVCrew account at https://www.uavcrew.ai/accounts/login/
+2. **Create an API key** at Dashboard → API Keys (`/dashboard/api-keys/`)
+   - Click "Create API Key"
+   - Give it a name (e.g., "MCP Server")
+   - Save the key securely - it's only shown once
+3. **Register your MCP server** at Dashboard → MCP Servers (`/dashboard/mcp/`)
+   - Click "Register MCP Server"
+   - Enter a name (e.g., "Production Server")
+   - Select the environment: **Development**, **UAT**, or **Production**
+   - Enter your server's public URL (e.g., `https://mcp.yourcompany.com`)
+   - **Copy the connection token** - it's only shown once!
+   - Use this token as your `MCP_API_KEY` environment variable
+
+---
+
 ## Quick Start
 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/uavcrew/compliance-mcp-server.git
-cd compliance-mcp-server
+git clone https://github.com/uavcrew/uavcrew-mcp-server.git
+cd uavcrew-mcp-server
 ```
 
 ### 2. Create Virtual Environment
@@ -115,25 +134,42 @@ SEED_DEMO_DATA=false
 
 ## Database Setup
 
-### Option 1: PostgreSQL (Recommended for Production)
+The MCP server supports multiple database backends via SQLAlchemy. Install the driver for your database and configure `DATABASE_URL`.
+
+### SQLite (Development/Testing)
+
+No driver needed - works out of the box.
 
 ```bash
-# Create database
-sudo -u postgres createdb compliance_db
-sudo -u postgres createuser compliance_user -P
-
-# Grant permissions
-sudo -u postgres psql -c "GRANT ALL ON DATABASE compliance_db TO compliance_user;"
-
-# Set DATABASE_URL
-export DATABASE_URL="postgresql://compliance_user:password@localhost:5432/compliance_db"
+DATABASE_URL="sqlite:///./compliance.db"
 ```
 
-### Option 2: SQLite (Development/Testing)
+### PostgreSQL
 
 ```bash
-# SQLite is the default - no setup needed
-export DATABASE_URL="sqlite:///./compliance.db"
+pip install uavcrew-mcp-server[postgresql]
+DATABASE_URL="postgresql://user:password@localhost:5432/compliance_db"
+```
+
+### MySQL / MariaDB
+
+```bash
+pip install uavcrew-mcp-server[mysql]
+DATABASE_URL="mysql+pymysql://user:password@localhost:3306/compliance_db"
+```
+
+### Microsoft SQL Server
+
+```bash
+pip install uavcrew-mcp-server[sqlserver]
+DATABASE_URL="mssql+pyodbc://user:password@localhost/compliance_db?driver=ODBC+Driver+17+for+SQL+Server"
+```
+
+### Oracle
+
+```bash
+pip install uavcrew-mcp-server[oracle]
+DATABASE_URL="oracle+oracledb://user:password@localhost:1521/compliance_db"
 ```
 
 ### Database Schema
@@ -261,8 +297,6 @@ See [docs/DATA_FORMATS.md](docs/DATA_FORMATS.md) for detailed schema documentati
 ### 1. Start the HTTP Server with Demo Data
 
 ```bash
-cd mcp_server
-
 # This seeds test flights, pilots, and aircraft
 SEED_DEMO_DATA=true PYTHONPATH=src python -m mcp_server.http_server
 ```
@@ -310,26 +344,15 @@ curl -X POST http://localhost:8200/mcp \
   }'
 ```
 
-### 4. Run Test Suite
-
-```bash
-# Run all tests
-pytest tests/ -v
-
-# Run specific test
-pytest tests/test_tools.py -v
-```
-
-### 5. Test with UAVCrew Service
+### 4. Test with UAVCrew Service
 
 Once your MCP server is running and accessible:
 
-1. Log into UAVCrew dashboard
-2. Go to Settings → Integrations → MCP
-3. Enter your MCP server URL: `https://mcp.yourcompany.com`
-4. Enter your API key
-5. Click "Test Connection"
-6. Submit a flight for analysis
+1. Log into UAVCrew dashboard at https://www.uavcrew.ai/accounts/login/
+2. Go to Dashboard → MCP Servers (`/dashboard/mcp/`)
+3. Click on your registered server to view details
+4. Click "Test Connection" to verify UAVCrew can reach your server
+5. If successful, submit a flight for compliance analysis
 
 ---
 
@@ -380,11 +403,11 @@ After=network.target postgresql.service
 Type=simple
 User=mcp
 Group=mcp
-WorkingDirectory=/opt/compliance-mcp-server
+WorkingDirectory=/opt/uavcrew-mcp-server
 Environment="DATABASE_URL=postgresql://..."
 Environment="MCP_API_KEY=your-key"
 Environment="MCP_PORT=8200"
-ExecStart=/opt/compliance-mcp-server/venv/bin/python -m mcp_server.server
+ExecStart=/opt/uavcrew-mcp-server/venv/bin/python -m mcp_server.http_server
 Restart=always
 RestartSec=5
 
@@ -396,21 +419,6 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable mcp-server
 sudo systemctl start mcp-server
-```
-
-### Docker
-
-```bash
-# Build
-docker build -t compliance-mcp-server .
-
-# Run
-docker run -d \
-  --name mcp-server \
-  -p 8200:8200 \
-  -e DATABASE_URL="postgresql://..." \
-  -e MCP_API_KEY="your-key" \
-  compliance-mcp-server
 ```
 
 ---
@@ -444,7 +452,7 @@ python -c "from mcp_server.database import get_db; print(get_db())"
 ## Support
 
 - **Documentation**: https://docs.uavcrew.ai/mcp
-- **Issues**: https://github.com/uavcrew/compliance-mcp-server/issues
+- **Issues**: https://github.com/uavcrew/uavcrew-mcp-server/issues
 - **Email**: support@uavcrew.ai
 
 ---
