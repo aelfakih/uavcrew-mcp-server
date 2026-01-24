@@ -1,0 +1,742 @@
+"""
+UAVCrew MCP Server CLI
+
+Interactive setup wizard and configuration tools.
+
+Usage:
+    uavcrew setup [--full]     # Interactive configuration wizard
+    uavcrew check              # Validate current configuration
+    uavcrew generate-systemd   # Generate systemd unit file
+"""
+
+import os
+import secrets
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+import httpx
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
+
+# Default UAVCrew API URL (can be overridden by environment variable)
+UAVCREW_API_URL = os.environ.get("UAVCREW_API_URL", "https://api.uavcrew.ai")
+
+app = typer.Typer(
+    name="uavcrew",
+    help="UAVCrew MCP Server configuration and management tools.",
+    no_args_is_help=True,
+)
+console = Console()
+
+# Database configuration templates
+DB_CONFIGS = {
+    "sqlite": {
+        "driver": None,  # Built-in
+        "pip_package": None,
+        "url_template": "sqlite:///{path}",
+        "default_path": "./compliance.db",
+    },
+    "postgresql": {
+        "driver": "psycopg2",
+        "pip_package": "psycopg2-binary",
+        "url_template": "postgresql://{user}:{password}@{host}:{port}/{database}",
+        "default_port": "5432",
+    },
+    "mysql": {
+        "driver": "pymysql",
+        "pip_package": "pymysql",
+        "url_template": "mysql+pymysql://{user}:{password}@{host}:{port}/{database}",
+        "default_port": "3306",
+    },
+    "sqlserver": {
+        "driver": "pyodbc",
+        "pip_package": "pyodbc",
+        "url_template": "mssql+pyodbc://{user}:{password}@{host}/{database}?driver=ODBC+Driver+17+for+SQL+Server",
+        "default_port": "1433",
+    },
+    "oracle": {
+        "driver": "oracledb",
+        "pip_package": "oracledb",
+        "url_template": "oracle+oracledb://{user}:{password}@{host}:{port}/{database}",
+        "default_port": "1521",
+    },
+}
+
+
+def check_driver_installed(db_type: str) -> bool:
+    """Check if the database driver is installed."""
+    config = DB_CONFIGS[db_type]
+    driver = config.get("driver")
+    if driver is None:
+        return True  # SQLite - no driver needed
+    try:
+        __import__(driver)
+        return True
+    except ImportError:
+        return False
+
+
+def install_driver(db_type: str) -> bool:
+    """Install the database driver via pip."""
+    config = DB_CONFIGS[db_type]
+    package = config.get("pip_package")
+    if package is None:
+        return True  # No package needed
+
+    console.print(f"Installing {package}...", style="yellow")
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", package],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        console.print(f"Installed {package}", style="green")
+        return True
+    except subprocess.CalledProcessError:
+        console.print(f"Failed to install {package}", style="red")
+        return False
+
+
+def build_database_url(db_type: str) -> str:
+    """Interactively build a database URL."""
+    config = DB_CONFIGS[db_type]
+
+    if db_type == "sqlite":
+        path = Prompt.ask(
+            "Database file path",
+            default=config["default_path"],
+        )
+        return config["url_template"].format(path=path)
+
+    # For all other databases, prompt for connection details
+    host = Prompt.ask("Host", default="localhost")
+    port = Prompt.ask("Port", default=config.get("default_port", ""))
+    database = Prompt.ask("Database name")
+    user = Prompt.ask("Username")
+    password = Prompt.ask("Password", password=True)
+
+    return config["url_template"].format(
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        password=password,
+    )
+
+
+def test_database_connection(url: str) -> tuple[bool, str]:
+    """Test database connection and return (success, message)."""
+    try:
+        from sqlalchemy import create_engine, text
+
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True, "Connection successful"
+    except Exception as e:
+        return False, str(e)
+
+
+def generate_secret_key() -> str:
+    """Generate a cryptographically secure secret key."""
+    return secrets.token_urlsafe(32)
+
+
+def load_env_file(path: Path) -> dict:
+    """Load environment variables from .env file."""
+    env = {}
+    if path.exists():
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, value = line.partition("=")
+                    env[key.strip()] = value.strip()
+    return env
+
+
+def write_env_file(path: Path, config: dict) -> None:
+    """Write configuration to .env file."""
+    lines = [
+        "# UAVCrew MCP Server Configuration",
+        "# Generated by: uavcrew setup",
+        "",
+        "# Database",
+        f"DATABASE_URL={config['DATABASE_URL']}",
+        "",
+        "# Security",
+        f"MCP_API_KEY={config.get('MCP_API_KEY', '')}",
+        f"SECRET_KEY={config.get('SECRET_KEY', '')}",
+        "",
+        "# Server",
+        f"MCP_HOST={config.get('MCP_HOST', '0.0.0.0')}",
+        f"MCP_PORT={config.get('MCP_PORT', '8200')}",
+        "",
+        "# Options",
+        f"SEED_DEMO_DATA={config.get('SEED_DEMO_DATA', 'false')}",
+        "",
+    ]
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+
+
+def detect_paths() -> dict:
+    """Detect virtualenv, working directory, and user."""
+    return {
+        "workdir": Path.cwd().resolve(),
+        "venv": Path(sys.prefix).resolve() if sys.prefix != sys.base_prefix else None,
+        "python": Path(sys.executable).resolve(),
+        "user": os.environ.get("USER", "root"),
+    }
+
+
+@dataclass
+class RegistrationResult:
+    """Result from MCP server auto-registration."""
+
+    success: bool
+    connection_token: str = ""
+    connection_id: str = ""
+    error: str = ""
+    is_update: bool = False
+
+
+def register_with_uavcrew(
+    api_key: str,
+    name: str,
+    environment: str,
+    endpoint_url: str,
+) -> RegistrationResult:
+    """
+    Register this MCP server with UAVCrew using an API key.
+
+    This calls the UAVCrew API to automatically register the MCP server
+    and retrieve a connection token.
+
+    Args:
+        api_key: UAVCrew API key with 'mcp:register' scope
+        name: Friendly name for this MCP server
+        environment: Deployment environment (dev/uat/prod)
+        endpoint_url: Public URL where this MCP server is accessible
+
+    Returns:
+        RegistrationResult with connection details or error
+    """
+    try:
+        with httpx.Client(timeout=30) as client:
+            response = client.post(
+                f"{UAVCREW_API_URL}/v1/mcp/register",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "name": name,
+                    "environment": environment,
+                    "endpoint_url": endpoint_url,
+                },
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return RegistrationResult(
+                    success=True,
+                    connection_token=data["connection_token"],
+                    connection_id=data["connection_id"],
+                    is_update=data.get("is_update", False),
+                )
+            elif response.status_code == 401:
+                return RegistrationResult(
+                    success=False,
+                    error="Invalid API key. Please check your key and try again.",
+                )
+            elif response.status_code == 403:
+                return RegistrationResult(
+                    success=False,
+                    error="API key missing 'mcp:register' scope. "
+                    "Create a new key with the 'mcp:register' scope in the dashboard.",
+                )
+            elif response.status_code == 502:
+                detail = response.json().get("detail", "")
+                return RegistrationResult(
+                    success=False,
+                    error=f"UAVCrew could not reach this server. {detail}",
+                )
+            else:
+                detail = response.json().get("detail", response.text)
+                return RegistrationResult(
+                    success=False,
+                    error=f"Registration failed: {detail}",
+                )
+
+    except httpx.ConnectError:
+        return RegistrationResult(
+            success=False,
+            error=f"Could not connect to UAVCrew API at {UAVCREW_API_URL}. "
+            "Check your internet connection.",
+        )
+    except httpx.RequestError as e:
+        return RegistrationResult(
+            success=False,
+            error=f"Request failed: {e}",
+        )
+
+
+def generate_systemd_unit(paths: dict, env_path: Path) -> str:
+    """Generate systemd unit file content."""
+    exec_start = f"{paths['python']} -m mcp_server.http_server"
+
+    return f"""[Unit]
+Description=UAVCrew MCP Server
+Documentation=https://docs.uavcrew.ai/mcp
+After=network.target
+
+[Service]
+Type=simple
+User={paths['user']}
+Group={paths['user']}
+WorkingDirectory={paths['workdir']}
+EnvironmentFile={env_path.resolve()}
+ExecStart={exec_start}
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={paths['workdir']}
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+@app.command()
+def setup(
+    full: bool = typer.Option(
+        False, "--full", "-f", help="Run full setup including validation and systemd"
+    ),
+):
+    """Interactive setup wizard for UAVCrew MCP Server."""
+    console.print(
+        Panel.fit(
+            "[bold blue]UAVCrew MCP Server Setup[/bold blue]",
+            border_style="blue",
+        )
+    )
+
+    config = {}
+    env_path = Path.cwd() / ".env"
+
+    # Check for existing .env
+    if env_path.exists():
+        if not Confirm.ask(
+            "\n[yellow].env file already exists. Overwrite?[/yellow]",
+            default=False,
+        ):
+            console.print("Setup cancelled.", style="yellow")
+            raise typer.Exit(0)
+
+    # Step 1: Database Configuration
+    console.print("\n[bold]1. Database Configuration[/bold]")
+
+    # Database type selection
+    db_choices = list(DB_CONFIGS.keys())
+    console.print("\nAvailable databases:")
+    for i, db in enumerate(db_choices, 1):
+        driver_status = "[green](built-in)[/green]" if db == "sqlite" else ""
+        console.print(f"  {i}. {db.title()} {driver_status}")
+
+    db_choice = Prompt.ask(
+        "\nSelect database",
+        choices=[str(i) for i in range(1, len(db_choices) + 1)],
+        default="1",
+    )
+    db_type = db_choices[int(db_choice) - 1]
+
+    # Install driver if needed
+    if not check_driver_installed(db_type):
+        if Confirm.ask(f"Install {db_type} driver?", default=True):
+            if not install_driver(db_type):
+                console.print("Cannot proceed without database driver.", style="red")
+                raise typer.Exit(1)
+        else:
+            console.print("Cannot proceed without database driver.", style="red")
+            raise typer.Exit(1)
+
+    # Build database URL
+    console.print()
+    database_url = build_database_url(db_type)
+
+    # Test connection
+    console.print("\nTesting connection... ", end="")
+    success, message = test_database_connection(database_url)
+    if success:
+        console.print("[green]OK[/green]")
+    else:
+        console.print(f"[red]FAILED[/red]")
+        console.print(f"Error: {message}", style="red")
+        if not Confirm.ask("Continue anyway?", default=False):
+            raise typer.Exit(1)
+
+    config["DATABASE_URL"] = database_url
+
+    # Step 2: UAVCrew Connection
+    console.print("\n[bold]2. UAVCrew Connection[/bold]")
+
+    console.print("\nHow would you like to connect to UAVCrew?")
+    console.print("  [cyan]1.[/cyan] Auto-register [green](recommended)[/green]")
+    console.print("      Uses your UAVCrew API key to register automatically")
+    console.print("  [cyan]2.[/cyan] Manual token")
+    console.print("      Paste connection token from dashboard")
+    console.print("  [cyan]3.[/cyan] Skip (configure later)")
+
+    connection_method = Prompt.ask(
+        "\nSelect option",
+        choices=["1", "2", "3"],
+        default="1",
+    )
+
+    if connection_method == "1":
+        # Auto-register flow
+        console.print("\n[bold]Auto-Registration[/bold]")
+        console.print(
+            "\nYou'll need an API key with the [cyan]mcp:register[/cyan] scope."
+        )
+        console.print(
+            "Create one at: [link]https://www.uavcrew.ai/dashboard/api-keys/[/link]"
+        )
+
+        api_key = Prompt.ask("\nUAVCrew API Key", password=True)
+        if not api_key:
+            console.print("API key is required for auto-registration.", style="yellow")
+            console.print("Falling back to manual token mode.\n")
+            connection_method = "2"
+        else:
+            server_name = Prompt.ask("Server name", default="MCP Server")
+            env_choice = Prompt.ask(
+                "Environment",
+                choices=["dev", "uat", "prod"],
+                default="prod",
+            )
+            endpoint_url = Prompt.ask(
+                "Public URL for this server",
+                default=f"http://localhost:{config.get('MCP_PORT', '8200')}",
+            )
+
+            console.print("\n[yellow]Registering with UAVCrew...[/yellow]")
+
+            # Perform registration
+            result = register_with_uavcrew(
+                api_key=api_key,
+                name=server_name,
+                environment=env_choice,
+                endpoint_url=endpoint_url,
+            )
+
+            if result.success:
+                config["MCP_API_KEY"] = result.connection_token
+                if result.is_update:
+                    console.print(
+                        "  [green]✓[/green] Existing connection updated and verified"
+                    )
+                else:
+                    console.print("  [green]✓[/green] Server registered successfully")
+                console.print(f"  [green]✓[/green] Connection ID: {result.connection_id}")
+                console.print("  [green]✓[/green] Connection token saved")
+            else:
+                console.print(f"  [red]✗[/red] Registration failed", style="red")
+                console.print(f"    {result.error}", style="red")
+
+                if Confirm.ask("\nTry manual token instead?", default=True):
+                    connection_method = "2"
+                else:
+                    console.print("Continuing without UAVCrew connection.", style="yellow")
+                    config["MCP_API_KEY"] = ""
+
+    if connection_method == "2":
+        # Manual token flow
+        console.print("\n[bold]Manual Token[/bold]")
+        console.print(
+            "\nGet a connection token from:"
+        )
+        console.print("  [link]https://www.uavcrew.ai/dashboard/mcp-servers/[/link]")
+
+        token = Prompt.ask("\nMCP Connection Token", password=True)
+        config["MCP_API_KEY"] = token if token else ""
+
+        if token:
+            console.print("  [green]✓[/green] Token configured")
+        else:
+            console.print("  [yellow]![/yellow] No token provided", style="yellow")
+
+    elif connection_method == "3":
+        # Skip
+        console.print("\n[yellow]Skipping UAVCrew connection.[/yellow]")
+        console.print("Configure later by editing .env or running setup again.")
+        config["MCP_API_KEY"] = ""
+
+    # Step 3: Security Key
+    console.print("\n[bold]3. Security[/bold]")
+
+    if Confirm.ask("Generate SECRET_KEY?", default=True):
+        config["SECRET_KEY"] = generate_secret_key()
+        console.print("  [green]✓[/green] Generated SECRET_KEY")
+
+    # Step 4: Options
+    console.print("\n[bold]4. Options[/bold]")
+
+    config["MCP_HOST"] = Prompt.ask("Server host", default="0.0.0.0")
+    config["MCP_PORT"] = Prompt.ask("Server port", default="8200")
+    config["SEED_DEMO_DATA"] = str(
+        Confirm.ask("Seed demo data on startup?", default=False)
+    ).lower()
+
+    # Write .env file
+    console.print("\n[bold]5. Writing Configuration[/bold]")
+    write_env_file(env_path, config)
+    console.print(f"  [green]✓[/green] Created {env_path}")
+
+    # Full mode: run check and offer systemd
+    if full:
+        console.print("\n[bold]6. Validation[/bold]")
+        _run_check(env_path)
+
+        console.print("\n[bold]7. Systemd Service (optional)[/bold]")
+        if Confirm.ask("Generate systemd service file?", default=False):
+            _generate_systemd(env_path)
+
+    # Done
+    console.print(
+        Panel.fit(
+            "[bold green]Setup complete![/bold green]\n\n"
+            "Start the server with:\n"
+            "  [cyan]mcp-http-server[/cyan]\n\n"
+            "Or run validation:\n"
+            "  [cyan]uavcrew check[/cyan]",
+            border_style="green",
+        )
+    )
+
+
+def _run_check(env_path: Optional[Path] = None) -> bool:
+    """Internal check implementation. Returns True if all checks pass."""
+    if env_path is None:
+        env_path = Path.cwd() / ".env"
+
+    all_passed = True
+
+    # Load .env if it exists
+    from dotenv import load_dotenv
+
+    load_dotenv(env_path)
+
+    # Environment checks
+    console.print("\n[bold]Environment:[/bold]")
+
+    if env_path.exists():
+        console.print("  [green]✓[/green] .env file exists")
+    else:
+        console.print("  [red]✗[/red] .env file not found")
+        all_passed = False
+
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        console.print("  [green]✓[/green] DATABASE_URL set")
+    else:
+        console.print("  [red]✗[/red] DATABASE_URL not set")
+        all_passed = False
+
+    # Database checks
+    console.print("\n[bold]Database:[/bold]")
+
+    if db_url:
+        # Detect database type from URL
+        if db_url.startswith("sqlite"):
+            db_type = "sqlite"
+        elif db_url.startswith("postgresql"):
+            db_type = "postgresql"
+        elif db_url.startswith("mysql"):
+            db_type = "mysql"
+        elif db_url.startswith("mssql"):
+            db_type = "sqlserver"
+        elif db_url.startswith("oracle"):
+            db_type = "oracle"
+        else:
+            db_type = "unknown"
+
+        if check_driver_installed(db_type):
+            driver = DB_CONFIGS.get(db_type, {}).get("driver", "built-in")
+            console.print(f"  [green]✓[/green] Driver installed ({driver})")
+        else:
+            console.print(f"  [red]✗[/red] Driver not installed for {db_type}")
+            all_passed = False
+
+        success, message = test_database_connection(db_url)
+        if success:
+            console.print("  [green]✓[/green] Connection successful")
+
+            # Check tables and data
+            try:
+                from sqlalchemy import create_engine, inspect, text
+
+                engine = create_engine(db_url)
+                inspector = inspect(engine)
+                tables = inspector.get_table_names()
+                console.print(f"  [green]✓[/green] Tables exist ({len(tables)} tables)")
+
+                # Count demo data
+                with engine.connect() as conn:
+                    pilots = conn.execute(text("SELECT COUNT(*) FROM pilots")).scalar()
+                    aircraft = conn.execute(
+                        text("SELECT COUNT(*) FROM aircraft")
+                    ).scalar()
+                    flights = conn.execute(text("SELECT COUNT(*) FROM flights")).scalar()
+                if pilots > 0:
+                    console.print(
+                        f"  [green]✓[/green] Data present ({pilots} pilots, {aircraft} aircraft, {flights} flights)"
+                    )
+                else:
+                    console.print("  [yellow]![/yellow] No data (run with SEED_DEMO_DATA=true)")
+            except Exception as e:
+                console.print(f"  [yellow]![/yellow] Could not inspect tables: {e}")
+        else:
+            console.print(f"  [red]✗[/red] Connection failed: {message}")
+            all_passed = False
+
+    # Security checks
+    console.print("\n[bold]Security:[/bold]")
+
+    api_key = os.environ.get("MCP_API_KEY")
+    if api_key:
+        # Mask the key for display
+        masked = api_key[:4] + "****" if len(api_key) > 4 else "****"
+        console.print(f"  [green]✓[/green] MCP_API_KEY configured ({masked})")
+    else:
+        console.print("  [yellow]![/yellow] MCP_API_KEY not set (server will accept any request)")
+
+    seed_demo = os.environ.get("SEED_DEMO_DATA", "false").lower()
+    if seed_demo == "true":
+        console.print("  [yellow]![/yellow] SEED_DEMO_DATA=true (disable in production)")
+
+    # Summary
+    if all_passed:
+        console.print("\n[bold green]All checks passed![/bold green]")
+    else:
+        console.print("\n[bold red]Some checks failed.[/bold red]")
+
+    return all_passed
+
+
+@app.command()
+def check():
+    """Validate current configuration."""
+    console.print(
+        Panel.fit(
+            "[bold blue]UAVCrew MCP Server - Configuration Check[/bold blue]",
+            border_style="blue",
+        )
+    )
+    success = _run_check()
+    raise typer.Exit(0 if success else 1)
+
+
+def _generate_systemd(env_path: Optional[Path] = None):
+    """Internal systemd generation."""
+    if env_path is None:
+        env_path = Path.cwd() / ".env"
+
+    paths = detect_paths()
+
+    # Show detected paths
+    table = Table(title="Detected Configuration")
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("Working directory", str(paths["workdir"]))
+    table.add_row("Python", str(paths["python"]))
+    table.add_row("User", paths["user"])
+    if paths["venv"]:
+        table.add_row("Virtual environment", str(paths["venv"]))
+    console.print(table)
+
+    # Generate unit file
+    unit_content = generate_systemd_unit(paths, env_path)
+
+    console.print("\n[bold]Generated unit file:[/bold]")
+    console.print(Panel(unit_content, title="mcp-server.service"))
+
+    # Save options
+    choices = [
+        "1. Save to current directory (./mcp-server.service)",
+        "2. Install to /etc/systemd/system/ (requires sudo)",
+        "3. Print only (don't save)",
+    ]
+    for choice in choices:
+        console.print(f"  {choice}")
+
+    action = Prompt.ask("\nSelect action", choices=["1", "2", "3"], default="1")
+
+    if action == "1":
+        output_path = Path.cwd() / "mcp-server.service"
+        with open(output_path, "w") as f:
+            f.write(unit_content)
+        console.print(f"\nSaved to {output_path}", style="green")
+        console.print("\nTo install manually:")
+        console.print(f"  sudo cp {output_path} /etc/systemd/system/")
+        console.print("  sudo systemctl daemon-reload")
+        console.print("  sudo systemctl enable --now mcp-server")
+
+    elif action == "2":
+        output_path = Path("/etc/systemd/system/mcp-server.service")
+        try:
+            # Try direct write first (if running as root)
+            with open(output_path, "w") as f:
+                f.write(unit_content)
+        except PermissionError:
+            # Fall back to sudo
+            console.print("Requires sudo privileges...", style="yellow")
+            proc = subprocess.run(
+                ["sudo", "tee", str(output_path)],
+                input=unit_content.encode(),
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                console.print("Failed to write systemd unit file", style="red")
+                return
+
+        console.print(f"\nInstalled to {output_path}", style="green")
+
+        # Reload systemd
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+        console.print("Reloaded systemd", style="green")
+
+        if Confirm.ask("Enable and start the service now?", default=True):
+            subprocess.run(
+                ["sudo", "systemctl", "enable", "--now", "mcp-server"],
+                check=True,
+            )
+            console.print("\nService started!", style="green")
+            console.print("Check status with: sudo systemctl status mcp-server")
+
+    else:
+        console.print("\nUnit file printed above. Copy and save manually.")
+
+
+@app.command("generate-systemd")
+def generate_systemd():
+    """Generate systemd unit file for the MCP server."""
+    console.print(
+        Panel.fit(
+            "[bold blue]UAVCrew MCP Server - Systemd Generator[/bold blue]",
+            border_style="blue",
+        )
+    )
+    _generate_systemd()
+
+
+if __name__ == "__main__":
+    app()
