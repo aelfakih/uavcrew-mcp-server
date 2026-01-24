@@ -1,43 +1,28 @@
-"""MCP tools for compliance data access."""
+"""MCP tools for compliance data access.
 
-from .flight_log import get_flight_log
-from .pilot import get_pilot
-from .aircraft import get_aircraft
-from .mission import get_mission
-from .maintenance import get_maintenance_history
+Database tools (read-only):
+- list_entities: Discover available data
+- describe_entity: See fields for an entity
+- query_entity: Query data with filters
+
+File tools (read-only):
+- list_files: List directory contents
+- read_file: Read file content
+- get_file_metadata: Get file info
+"""
+
+from .database import list_entities, describe_entity, query_entity
 from .list_files import list_files
 from .read_file import read_file
 from .file_metadata import get_file_metadata
-from .certifications import (
-    # READ tools
-    search_pilots,
-    check_authorization,
-    get_expiring_certifications,
-    # WRITE tools
-    update_faa_verification,
-    record_verification_audit,
-    update_training_status,
-    flag_certification_warning,
-)
 
 __all__ = [
-    # Compliance data tools (READ)
-    "get_flight_log",
-    "get_pilot",
-    "get_aircraft",
-    "get_mission",
-    "get_maintenance_history",
-    # File access tools (READ)
+    # Database tools (generic, read-only)
+    "list_entities",
+    "describe_entity",
+    "query_entity",
+    # File tools (read-only)
     "list_files",
     "read_file",
     "get_file_metadata",
-    # Certification tools (READ)
-    "search_pilots",
-    "check_authorization",
-    "get_expiring_certifications",
-    # Certification tools (WRITE)
-    "update_faa_verification",
-    "record_verification_audit",
-    "update_training_status",
-    "flag_certification_warning",
 ]
