@@ -191,10 +191,19 @@ def write_env_file(path: Path, config: dict) -> None:
 
 def detect_paths() -> dict:
     """Detect virtualenv, working directory, and user."""
+    in_venv = sys.prefix != sys.base_prefix
+
+    if in_venv:
+        # Use the venv python directly — do NOT resolve() as that follows
+        # symlinks to the system python, which won't have our packages.
+        python = Path(sys.prefix) / "bin" / Path(sys.executable).name
+    else:
+        python = Path(sys.executable)
+
     return {
         "workdir": Path.cwd().resolve(),
-        "venv": Path(sys.prefix).resolve() if sys.prefix != sys.base_prefix else None,
-        "python": Path(sys.executable).resolve(),
+        "venv": Path(sys.prefix) if in_venv else None,
+        "python": python,
         "user": os.environ.get("USER", "root"),
     }
 
@@ -373,9 +382,10 @@ def _check_process_running(port: int = 8200) -> dict:
 @app.command()
 def status():
     """Check MCP gateway status, configuration, and tools."""
+    from . import __version__
     console.print(
         Panel.fit(
-            "[bold blue]UAVCrew MCP Gateway Status[/bold blue]",
+            f"[bold blue]UAVCrew MCP Gateway[/bold blue] [dim]v{__version__}[/dim]",
             border_style="blue",
         )
     )
