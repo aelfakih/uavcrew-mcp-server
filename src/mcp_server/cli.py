@@ -1108,8 +1108,17 @@ def _generate_systemd(env_path: Optional[Path] = None):
             except subprocess.CalledProcessError:
                 console.print("  [yellow]![/yellow] Could not enable service")
 
-        console.print("\n  [bold]To start now:[/bold] sudo systemctl start mcp-server")
-        console.print("  [bold]To check status:[/bold] sudo systemctl status mcp-server")
+        if Confirm.ask("\n  Restart service now?", default=True):
+            try:
+                subprocess.run(
+                    ["sudo", "systemctl", "restart", SERVICE_NAME],
+                    check=True,
+                    capture_output=True,
+                )
+                console.print(f"  [green]✓[/green] Service restarted")
+            except subprocess.CalledProcessError:
+                console.print(f"  [yellow]![/yellow] Could not restart service")
+                console.print(f"  Run manually: [cyan]sudo systemctl restart {SERVICE_NAME}[/cyan]")
 
     elif action == "2":
         output_path = Path.cwd() / "mcp-server.service"
