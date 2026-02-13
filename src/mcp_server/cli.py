@@ -16,6 +16,7 @@ import os
 import secrets
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -510,6 +511,138 @@ def status():
         console.print(f"  \u2192 Run [cyan]uavcrew generate-systemd[/cyan] to create service")
     elif not running and restart_cmd:
         console.print(f"  \u2192 Start: [cyan]{restart_cmd}[/cyan]")
+
+
+# =============================================================================
+# Service Lifecycle: start, stop, restart
+# =============================================================================
+
+
+def _get_port() -> int:
+    """Read MCP_PORT from .env or return default."""
+    env_path = Path.cwd() / ".env"
+    if env_path.exists():
+        env_vars = load_env_file(env_path)
+        return int(env_vars.get("MCP_PORT", "8200"))
+    return 8200
+
+
+def _wait_healthy(port: int, timeout: int = 5) -> dict | None:
+    """Poll health endpoint until healthy or timeout."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = f"http://localhost:{port}/health"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                return json.loads(resp.read())
+        except (urllib.error.URLError, OSError):
+            time.sleep(0.5)
+    return None
+
+
+def _require_service_installed() -> dict:
+    """Check systemd service is installed, exit with message if not."""
+    svc = _check_systemd_service()
+    if not svc["installed"]:
+        console.print("[red]Systemd service not installed.[/red]")
+        console.print("Run [cyan]uavcrew setup[/cyan] or [cyan]uavcrew generate-systemd[/cyan] first.")
+        raise typer.Exit(1)
+    return svc
+
+
+@app.command()
+def start():
+    """Start the MCP Gateway service."""
+    svc = _require_service_installed()
+
+    if svc["running"]:
+        port = _get_port()
+        process = _check_process_running(port)
+        worker_info = f" ({process['workers']} workers)" if process["workers"] else ""
+        console.print(f"[green]Service is already running{worker_info}.[/green]")
+        return
+
+    console.print("Starting MCP Gateway...")
+    try:
+        subprocess.run(
+            ["sudo", "systemctl", "start", SERVICE_NAME],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Failed to start service.[/red]")
+        console.print(f"Check logs: [cyan]sudo journalctl -u {SERVICE_NAME} --no-pager -n 20[/cyan]")
+        raise typer.Exit(1)
+
+    port = _get_port()
+    health = _wait_healthy(port)
+    if health:
+        process = _check_process_running(port)
+        worker_info = f", {process['workers']} workers" if process["workers"] else ""
+        console.print(
+            f"[green]\u2713[/green] MCP Gateway running "
+            f"({health.get('entities', '?')} entities{worker_info})"
+        )
+    else:
+        console.print("[yellow]Service started but health check not responding yet.[/yellow]")
+        console.print(f"Check logs: [cyan]sudo journalctl -u {SERVICE_NAME} --no-pager -n 20[/cyan]")
+
+
+@app.command()
+def stop():
+    """Stop the MCP Gateway service."""
+    svc = _require_service_installed()
+
+    if not svc["running"]:
+        console.print("[yellow]Service is already stopped.[/yellow]")
+        return
+
+    console.print("Stopping MCP Gateway...")
+    try:
+        subprocess.run(
+            ["sudo", "systemctl", "stop", SERVICE_NAME],
+            check=True,
+            capture_output=True,
+        )
+        console.print(f"[green]\u2713[/green] Service stopped.")
+    except subprocess.CalledProcessError:
+        console.print("[red]Failed to stop service.[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def restart():
+    """Restart the MCP Gateway service."""
+    svc = _require_service_installed()
+
+    console.print("Restarting MCP Gateway...")
+    try:
+        subprocess.run(
+            ["sudo", "systemctl", "restart", SERVICE_NAME],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        console.print("[red]Failed to restart service.[/red]")
+        console.print(f"Check logs: [cyan]sudo journalctl -u {SERVICE_NAME} --no-pager -n 20[/cyan]")
+        raise typer.Exit(1)
+
+    port = _get_port()
+    health = _wait_healthy(port)
+    if health:
+        process = _check_process_running(port)
+        worker_info = f", {process['workers']} workers" if process["workers"] else ""
+        console.print(
+            f"[green]\u2713[/green] MCP Gateway running "
+            f"({health.get('entities', '?')} entities{worker_info})"
+        )
+    else:
+        console.print("[yellow]Service restarted but health check not responding yet.[/yellow]")
+        console.print(f"Check logs: [cyan]sudo journalctl -u {SERVICE_NAME} --no-pager -n 20[/cyan]")
 
 
 # =============================================================================

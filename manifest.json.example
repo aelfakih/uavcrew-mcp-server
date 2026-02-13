@@ -200,6 +200,22 @@
           "path": "/parts/{id}"
         }
       }
+    },
+    "fleet": {
+      "path": "/fleets",
+      "id_field": "id",
+      "read": true,
+      "search": true,
+      "actions": {
+        "create": {
+          "method": "POST",
+          "path": "/fleets"
+        },
+        "update": {
+          "method": "PATCH",
+          "path": "/fleets/{id}"
+        }
+      }
     }
   }
 }
