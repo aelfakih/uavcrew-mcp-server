@@ -47,7 +47,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _manifest = load_manifest()
-_api_client = ApiClient(_manifest["api_base_url"])
+_api_base_url = os.environ.get("CLIENT_API_BASE_URL", "").strip() or _manifest["api_base_url"]
+_api_client = ApiClient(_api_base_url)
 
 # ---------------------------------------------------------------------------
 # FastMCP instance

@@ -1003,6 +1003,21 @@ def setup():
         console.print(f"  [yellow]![/yellow] Manifest not found at {config['MCP_MANIFEST_PATH']}")
         console.print("  [dim]Copy manifest.json.example and customize it before starting the server.[/dim]")
 
+    # Client API base URL
+    console.print("\n[bold]Client API Base URL[/bold]")
+    console.print("  The base URL of the REST API that the gateway forwards requests to.")
+    console.print("  Entity paths from manifest.json are appended to this URL.")
+    console.print("  Examples: 'https://app.example.com/api/v1', 'http://localhost:8000/api/v1'")
+    config["CLIENT_API_BASE_URL"] = Prompt.ask(
+        "\n  Client API base URL",
+        default=existing.get("CLIENT_API_BASE_URL", ""),
+    )
+
+    if config["CLIENT_API_BASE_URL"]:
+        console.print(f"  [green]\u2713[/green] Base URL: {config['CLIENT_API_BASE_URL']}")
+    else:
+        console.print("  [yellow]![/yellow] No base URL provided - will use api_base_url from manifest.json")
+
     # Client API token
     console.print("\n[bold]Client API Token[/bold]")
     console.print("  Bearer token for authenticating with the client API.")

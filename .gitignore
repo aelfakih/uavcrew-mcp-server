@@ -38,6 +38,9 @@ env/
 .env.*.local
 manifest.json
 PLAN.md
+caddy-mcp.conf
+nginx-mcp.conf
+apache-mcp.conf
 
 # Database (demo db can be regenerated)
 *.db
