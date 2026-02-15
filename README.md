@@ -1,25 +1,25 @@
 # UAVCrew MCP Gateway
 
-Client-deployable MCP Gateway that gives UAVCrew's AI agents secure access to your drone operation data — database, files, and object storage.
+Manifest-driven MCP Gateway that gives UAVCrew's AI agents secure access to your drone operation data through your existing REST API.
 
 ## Overview
 
-This gateway runs on **your infrastructure** and provides controlled access to your data. UAVCrew's AI agents connect over HTTPS to discover your database schema, query compliance data, and access files — without you uploading anything.
+The gateway runs on **your infrastructure** and translates MCP tool calls into authenticated HTTP requests against your REST API. UAVCrew's AI agents connect over HTTPS using the [Model Context Protocol](https://modelcontextprotocol.io/) to read, search, and act on your data — without direct database access.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  YOUR INFRASTRUCTURE                                            │
 │                                                                 │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │ Your Data    │    │ MCP Gateway  │    │   HTTPS      │      │
-│  │ (PostgreSQL, │───>│  Port 8200   │<───│  Nginx/Caddy │<─────┼── UAVCrew AI
-│  │  MySQL, etc) │    │  (local)     │    │  Port 443    │      │
+│  │ Your REST    │    │ MCP Gateway  │    │   HTTPS      │      │
+│  │ API (Django, │<───│  Port 8200   │<───│  Nginx/Caddy │<─────┼── UAVCrew AI
+│  │  Rails, etc) │    │  (gunicorn)  │    │  Port 443    │      │
 │  └──────────────┘    └──────────────┘    └──────────────┘      │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Your data stays on your network.** UAVCrew's AI queries only what it needs for compliance analysis.
+**Your data stays on your network.** The gateway forwards only the API calls needed for compliance analysis.
 
 ---
 
@@ -37,22 +37,6 @@ source venv/bin/activate
 pip install -e .
 ```
 
-Install your database driver:
-
-```bash
-# PostgreSQL (recommended)
-pip install -e ".[postgresql]"
-
-# MySQL / MariaDB
-pip install -e ".[mysql]"
-
-# SQL Server
-pip install -e ".[sqlserver]"
-
-# Oracle
-pip install -e ".[oracle]"
-```
-
 ### 2. Run the Setup Wizard
 
 ```bash
@@ -61,15 +45,22 @@ uavcrew setup
 
 The wizard will:
 1. Configure server identity and public URL
-2. Set up your database connection
-3. Configure the UAVCrew connection token
-4. Generate reverse proxy configuration (Caddy/Nginx/Apache)
-5. Create and install a systemd service
-6. Restart the service
+2. Set the manifest path (entity definitions)
+3. Set the client API base URL
+4. Configure the UAVCrew API key
+5. Generate reverse proxy configuration (Caddy/Nginx/Apache)
+6. Create and install a systemd service
 
-### 3. Verify
+### 3. Register a Tenant
 
 ```bash
+uavcrew tenants add --tenant-id <org-uuid> --token <api-key>
+```
+
+### 4. Start and Verify
+
+```bash
+uavcrew start
 uavcrew status
 ```
 
@@ -79,11 +70,17 @@ uavcrew status
 
 | Command | Description |
 |---------|-------------|
-| `uavcrew status` | Check status, database, tools, and service |
 | `uavcrew setup` | Interactive configuration wizard |
-| `uavcrew keys list` | Show configured API keys |
+| `uavcrew start` | Start the gateway service |
+| `uavcrew stop` | Stop the gateway service |
+| `uavcrew restart` | Restart the gateway service |
+| `uavcrew status` | Show status, entities, auth mode, and service health |
+| `uavcrew keys list` | List configured API keys |
 | `uavcrew keys add <token>` | Add an API key from UAVCrew |
 | `uavcrew keys remove <prefix>` | Remove an API key |
+| `uavcrew tenants list` | List registered tenants |
+| `uavcrew tenants add` | Register a tenant with their API token |
+| `uavcrew tenants remove` | Remove a tenant |
 | `uavcrew generate-systemd` | Generate and install systemd unit file |
 
 ---
@@ -96,117 +93,85 @@ Create a `.env` file (the setup wizard does this automatically):
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DATABASE_URL` | Yes | - | Database connection string |
-| `MCP_API_KEY` | Yes (prod) | - | Primary API key for authentication |
-| `MCP_API_KEYS` | No | - | Additional API keys (comma-separated) |
+| `MCP_API_KEY` | Yes (prod) | - | API key for authenticating requests from UAVCrew |
+| `CLIENT_API_BASE_URL` | No | from manifest | Base URL of your REST API |
 | `MCP_HOST` | No | `127.0.0.1` | Server bind address |
 | `MCP_PORT` | No | `8200` | Server port |
 | `MCP_SERVER_NAME` | No | `MCP Gateway` | Friendly name for UAVCrew dashboard |
 | `MCP_PUBLIC_URL` | No | - | HTTPS URL where UAVCrew connects |
-| `SECRET_KEY` | No | auto-generated | Secret key for internal use |
-| `SEED_DEMO_DATA` | No | `false` | Seed demo data for testing |
-| `MINIO_ENDPOINT_URL` | No | - | MinIO/S3 endpoint for storage tools |
-| `MINIO_ACCESS_KEY` | No | - | MinIO/S3 access key |
-| `MINIO_SECRET_KEY` | No | - | MinIO/S3 secret key |
-| `MINIO_BUCKET_PREFIX` | No | - | Bucket prefix for organization buckets |
+| `MCP_JWT_PUBLIC_KEY_PATH` | No | - | Path to K3 public key for JWT auth |
+| `MCP_TENANT_DB_PATH` | No | `tenants.db` | SQLite database for tenant tokens |
+| `LOG_LEVEL` | No | `INFO` | Log level: DEBUG, INFO, WARNING, ERROR |
 
 See [.env.example](.env.example) for a full template.
+
+### Manifest
+
+The gateway is driven by a `manifest.json` file that declares your entities, API paths, and available actions. See [manifest.json.example](manifest.json.example) for the full schema.
+
+```json
+{
+  "api_base_url": "https://api.example.com/api/v1",
+  "entities": {
+    "pilot": {
+      "path": "/pilots",
+      "id_field": "id",
+      "read": true,
+      "search": true,
+      "actions": {
+        "create": { "method": "POST", "path": "/pilots" },
+        "update": { "method": "PATCH", "path": "/pilots/{id}" }
+      }
+    }
+  }
+}
+```
 
 ---
 
 ## Tools
 
-The gateway exposes 13 tools to UAVCrew AI agents:
+The gateway exposes 4 tools and 1 resource to UAVCrew AI agents:
 
-### Database Tools
-
-| Tool | Description |
-|------|-------------|
-| `list_tables` | List all tables with row counts |
-| `describe_table` | Get columns, types, primary keys, foreign keys, and sample data |
-| `query_table` | Query data with column selection, WHERE, ORDER BY, and LIMIT |
-
-### File Access Tools
+### Tools
 
 | Tool | Description |
 |------|-------------|
-| `list_files` | List files in a directory with optional pattern matching |
-| `read_file` | Read file content |
-| `get_file_metadata` | Get file size, type, modification dates |
+| `get_entity` | Get a single entity record by ID (or singleton like company) |
+| `list_entities` | List entity records with filtering, sorting, and pagination |
+| `search` | Search across one or all entity types |
+| `action` | Execute a write action on an entity (create, update, start, etc.) |
 
-### Storage Tools (MinIO/S3)
+### Resources
 
-Requires `MINIO_*` environment variables to be configured.
-
-| Tool | Description |
-|------|-------------|
-| `storage_list` | List files in organization storage bucket |
-| `storage_get` | Get file content or presigned download URL |
-| `storage_search` | Search files by name pattern |
-| `storage_quota` | Check storage usage and limits |
-| `storage_classify` | Tag files with classification metadata |
-| `storage_notes` | Add notes/annotations to stored files |
-| `storage_move` | Move or rename files within the bucket |
+| Resource | Description |
+|----------|-------------|
+| `entities://manifest` | Entity definitions, paths, and available actions |
 
 ---
 
 ## API Endpoints
 
-### REST API (used by UAVCrew)
-
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/health` | No | Health check (returns service name and version) |
-| GET | `/mcp/tools` | Bearer | List available tools |
-| POST | `/mcp/tools/call` | Bearer | Call a tool |
-
-### JSON-RPC 2.0 (MCP standard)
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/jsonrpc` | Bearer | MCP-standard JSON-RPC 2.0 endpoint |
-
-The JSON-RPC endpoint supports the standard MCP protocol methods:
-
-- `initialize` - Returns server capabilities and protocol version
-- `notifications/initialized` - Client acknowledgment (returns 202)
-- `tools/list` - List available tools in MCP format
-- `tools/call` - Call a tool, returns result in MCP content format
-- `ping` - Keepalive
+| `GET` | `/health` | No | Health check (version, entity count, auth mode) |
+| `POST` | `/mcp` | Bearer | MCP Streamable HTTP endpoint |
+| `GET` | `/tenants` | Bearer | List registered tenants |
+| `POST` | `/tenants` | Bearer | Register a tenant |
+| `DELETE` | `/tenants/{id}` | Bearer | Remove a tenant |
 
 ### Authentication
 
-Include the API key in the Authorization header:
+The gateway supports two authentication modes:
+
+**JWT (recommended):** UAVCrew mints delegation tokens (T1) signed with RS256. The gateway validates using the K3 public key and resolves per-tenant API tokens (K4) from the tenant database.
+
+**Static API key (legacy):** Single or multiple API keys via `MCP_API_KEY` / `MCP_API_KEYS` environment variables.
+
+Include the token in the Authorization header:
 
 ```
-Authorization: Bearer mcp_xxxxxxxxxxxxxxxxxxxx
-```
-
-### REST Tool Call Format
-
-```json
-POST /mcp/tools/call
-
-{
-  "tool": "list_tables",
-  "arguments": {}
-}
-```
-
-### JSON-RPC Tool Call Format
-
-```json
-POST /jsonrpc
-
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "list_tables",
-    "arguments": {}
-  }
-}
+Authorization: Bearer <token>
 ```
 
 ---
@@ -220,28 +185,16 @@ cd /opt/ayna/uavcrew-mcp-server
 git pull
 source venv/bin/activate
 pip install -e .
-uavcrew generate-systemd    # regenerates unit file and restarts service
+uavcrew restart
 ```
 
-### Systemd Service
-
-The setup wizard generates and installs a systemd service. You can also do it manually:
+### Management
 
 ```bash
-uavcrew generate-systemd
-```
-
-### Management Commands
-
-```bash
-# Start/stop/restart
-sudo systemctl start mcp-server
-sudo systemctl stop mcp-server
-sudo systemctl restart mcp-server
-
-# Check status
-sudo systemctl status mcp-server
-uavcrew status
+uavcrew start       # start the service
+uavcrew stop        # stop the service
+uavcrew restart     # restart the service
+uavcrew status      # check health and configuration
 
 # View logs
 sudo journalctl -u mcp-server -f
@@ -257,67 +210,30 @@ sudo journalctl -u mcp-server -f
 curl http://localhost:8200/health
 ```
 
-### List Tools (REST)
+### MCP Endpoint
+
+The gateway uses MCP Streamable HTTP at `/mcp`. Connect using any MCP-compatible client:
 
 ```bash
-curl -H "Authorization: Bearer YOUR_KEY" http://localhost:8200/mcp/tools
-```
-
-### Call a Tool (REST)
-
-```bash
-curl -X POST http://localhost:8200/mcp/tools/call \
-  -H "Authorization: Bearer YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"tool": "list_tables", "arguments": {}}'
-```
-
-### JSON-RPC Initialize
-
-```bash
-curl -X POST http://localhost:8200/jsonrpc \
-  -H "Authorization: Bearer YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
-```
-
-### JSON-RPC Tool Call
-
-```bash
-curl -X POST http://localhost:8200/jsonrpc \
-  -H "Authorization: Bearer YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_tables","arguments":{}}}'
-```
-
-### Demo Data
-
-For testing without production data:
-
-```bash
-SEED_DEMO_DATA=true mcp-gateway
+# Using the MCP CLI
+mcp connect http://localhost:8200/mcp --header "Authorization: Bearer YOUR_KEY"
 ```
 
 ---
 
 ## Security
 
-**See [docs/DATABASE_SECURITY.md](docs/DATABASE_SECURITY.md) for comprehensive security configuration.**
-
-Key requirements:
-
-1. **Read-Only Database User** - Create a dedicated user with SELECT-only permissions
-2. **Column Filtering** - Use views to expose only compliance-relevant fields
-3. **PII Protection** - Anonymize or exclude personal information
-4. **Network Isolation** - Database accessible only to MCP gateway, not internet
-5. **HTTPS** - Always use a reverse proxy with SSL certificates
-6. **API Keys** - Rotate keys regularly via the UAVCrew dashboard
+1. **HTTPS** - Always use a reverse proxy with TLS termination
+2. **API Keys** - Rotate keys regularly via the UAVCrew dashboard
+3. **Per-Tenant Tokens** - Each tenant gets isolated API credentials (K4)
+4. **Scope Enforcement** - T1 JWTs carry scoped permissions per entity and operation
+5. **Network Isolation** - Bind to 127.0.0.1 behind a reverse proxy
 
 ### HTTPS Setup
 
 The gateway listens on a local port. Use a reverse proxy for HTTPS:
 
-**Caddy (Recommended - automatic HTTPS):**
+**Caddy (recommended - automatic HTTPS):**
 
 ```
 mcp.yourcompany.com {
@@ -331,7 +247,7 @@ mcp.yourcompany.com {
 sudo certbot --nginx -d mcp.yourcompany.com
 ```
 
-See the full proxy configurations in `uavcrew setup` output.
+See the proxy configurations generated by `uavcrew setup`.
 
 ---
 
@@ -348,29 +264,12 @@ sudo journalctl -u mcp-server -f
 
 1. Check firewall allows HTTPS (port 443)
 2. Verify SSL certificate is valid
-3. Test API key: `curl -H "Authorization: Bearer KEY" https://your-mcp/health`
-
-### Database connection fails
-
-```bash
-uavcrew status
-```
-
-### No tables returned
-
-Verify the database user has SELECT permissions:
-
-```sql
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO mcp_readonly;
-```
+3. Test health: `curl https://your-mcp-domain/health`
 
 ### Old version still running after update
 
-If `/health` returns an old version after `git pull && pip install`:
-
 ```bash
-# Regenerate systemd unit (ensures venv python is used) and restart
-uavcrew generate-systemd
+uavcrew restart
 ```
 
 ---
