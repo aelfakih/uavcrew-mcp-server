@@ -129,22 +129,6 @@
         }
       }
     },
-    "product": {
-      "path": "/products",
-      "id_field": "id",
-      "read": true,
-      "search": true,
-      "actions": {
-        "create": {
-          "method": "POST",
-          "path": "/products"
-        },
-        "update": {
-          "method": "PATCH",
-          "path": "/products/{id}"
-        }
-      }
-    },
     "artifact": {
       "path": "/storage/files",
       "id_field": "id",
