@@ -13,7 +13,6 @@ Usage:
 """
 
 import os
-import secrets
 import subprocess
 import sys
 import time
@@ -32,11 +31,6 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
-
-
-def generate_secret_key() -> str:
-    """Generate a cryptographically secure secret key."""
-    return secrets.token_urlsafe(32)
 
 
 def load_env_file(path: Path) -> dict:
@@ -400,12 +394,14 @@ def status():
         else:
             console.print("  [yellow]![/yellow] No API keys configured (server will be open)")
 
-        # Check client API token
-        client_token = env_vars.get("CLIENT_API_TOKEN", "")
-        if client_token:
-            console.print("  [green]\u2713[/green] CLIENT_API_TOKEN configured")
+        # Check tenants
+        from .tenant_db import list_tenants
+        tenants = list_tenants()
+        if tenants:
+            console.print(f"  [green]\u2713[/green] {len(tenants)} tenant(s) registered")
         else:
-            console.print("  [yellow]![/yellow] CLIENT_API_TOKEN not set (API calls will fail)")
+            console.print("  [yellow]![/yellow] No tenants registered")
+            console.print("  [dim]Run: uavcrew tenants add --tenant-id <id> --token <key>[/dim]")
 
         port = int(env_vars.get("MCP_PORT", "8200"))
         public_url = env_vars.get("MCP_PUBLIC_URL", "")
@@ -1000,8 +996,15 @@ def setup():
             if not Confirm.ask("  Continue anyway?", default=False):
                 raise typer.Exit(1)
     else:
-        console.print(f"  [yellow]![/yellow] Manifest not found at {config['MCP_MANIFEST_PATH']}")
-        console.print("  [dim]Copy manifest.json.example and customize it before starting the server.[/dim]")
+        example_path = Path("manifest.json.example")
+        if example_path.exists():
+            import shutil
+            shutil.copy(example_path, manifest_path)
+            console.print(f"  [green]\u2713[/green] Copied manifest.json.example → {manifest_path}")
+            console.print("  [dim]Edit manifest.json to customize entity paths for your API.[/dim]")
+        else:
+            console.print(f"  [yellow]![/yellow] Manifest not found at {config['MCP_MANIFEST_PATH']}")
+            console.print("  [dim]Create a manifest.json before starting the server.[/dim]")
 
     # Client API base URL
     console.print("\n[bold]Client API Base URL[/bold]")
@@ -1018,81 +1021,21 @@ def setup():
     else:
         console.print("  [yellow]![/yellow] No base URL provided - will use api_base_url from manifest.json")
 
-    # Client API token
-    console.print("\n[bold]Client API Token[/bold]")
-    console.print("  Bearer token for authenticating with the client API.")
-    console.print("  The gateway sends this token with every request to the client API.")
-    token = Prompt.ask(
-        "\n  Client API token",
-        default=existing.get("CLIENT_API_TOKEN", ""),
-        password=True,
-    )
-    config["CLIENT_API_TOKEN"] = token
-
-    if token:
-        console.print("  [green]\u2713[/green] Token saved")
-    else:
-        console.print("  [yellow]![/yellow] No token provided - API calls will fail until configured")
-
     # =========================================================================
-    # STEP 3: UAVCrew Connection Token
+    # STEP 3: Save Configuration
     # =========================================================================
     console.print("\n" + "=" * 60)
-    console.print("[bold cyan]STEP 3: UAVCrew Connection Token[/bold cyan]")
-    console.print("=" * 60)
-    console.print(
-        "\nTo connect this MCP gateway to UAVCrew.ai, you need a connection token.\n"
-    )
-    console.print("[bold]To get your token:[/bold]")
-    console.print("  1. Go to [link]https://www.uavcrew.ai/dashboard/mcp/[/link]")
-    console.print("  2. Click [cyan]'Register MCP Server'[/cyan]")
-    console.print(f"  3. Enter name: [cyan]{config['MCP_SERVER_NAME']}[/cyan]")
-    console.print(f"  4. Enter URL: [cyan]{config['MCP_PUBLIC_URL']}[/cyan]")
-    console.print("  5. Copy the connection token shown")
-    console.print("\n[dim]The token starts with 'mcp_' and is shown only once.[/dim]")
-
-    mcp_key = Prompt.ask(
-        "\n  Connection token",
-        default=existing.get("MCP_API_KEY", ""),
-        password=True,
-    )
-    config["MCP_API_KEY"] = mcp_key
-
-    if mcp_key:
-        console.print("  [green]\u2713[/green] Token saved")
-    else:
-        console.print("  [yellow]![/yellow] No token provided - configure later in .env")
-
-    # =========================================================================
-    # STEP 4: Security
-    # =========================================================================
-    console.print("\n" + "=" * 60)
-    console.print("[bold cyan]STEP 4: Security[/bold cyan]")
-    console.print("=" * 60)
-
-    # Secret key
-    if not existing.get("SECRET_KEY"):
-        config["SECRET_KEY"] = generate_secret_key()
-        console.print("\n  [green]\u2713[/green] Generated SECRET_KEY")
-    else:
-        config["SECRET_KEY"] = existing["SECRET_KEY"]
-        console.print("\n  [green]\u2713[/green] Using existing SECRET_KEY")
-
-    # =========================================================================
-    # STEP 5: Write Configuration
-    # =========================================================================
-    console.print("\n" + "=" * 60)
-    console.print("[bold cyan]STEP 5: Save Configuration[/bold cyan]")
+    console.print("[bold cyan]STEP 3: Save Configuration[/bold cyan]")
     console.print("=" * 60)
 
     write_env_file(env_path, config)
     console.print(f"\n  [green]\u2713[/green] Configuration saved to {env_path}")
 
     # =========================================================================
-    # STEP 6: Reverse Proxy Setup
+    # STEP 4: Reverse Proxy Setup
     # =========================================================================
     console.print("\n" + "=" * 60)
-    console.print("[bold cyan]STEP 6: Reverse Proxy Setup[/bold cyan]")
+    console.print("[bold cyan]STEP 4: Reverse Proxy Setup[/bold cyan]")
     console.print("=" * 60)
     console.print(
         "\nA reverse proxy handles HTTPS and forwards requests to the MCP gateway.\n"
@@ -1114,89 +1057,126 @@ def setup():
     # Extract domain from public URL
     domain = config["MCP_PUBLIC_URL"].replace("https://", "").replace("http://", "").rstrip("/")
 
-    if proxy_choice == "1":
-        # Caddy
-        caddy_config = generate_caddy_config(domain)
-        console.print("\n[bold]Caddy Configuration:[/bold]")
-        console.print(Panel(caddy_config, title="Add to /etc/caddy/Caddyfile"))
-        console.print("\n[bold]To apply:[/bold]")
-        console.print("  1. Add the above to your Caddyfile")
-        console.print("  2. Run: [cyan]sudo systemctl reload caddy[/cyan]")
-        console.print("\n  Caddy will automatically obtain and renew SSL certificates.")
+    proxy_configs = {
+        "1": ("caddy-mcp.conf", generate_caddy_config, "Add to /etc/caddy/Caddyfile"),
+        "2": ("nginx-mcp.conf", generate_nginx_config, f"/etc/nginx/sites-available/{domain}"),
+        "3": ("apache-mcp.conf", generate_apache_config, f"/etc/apache2/sites-available/{domain}.conf"),
+    }
 
-        if Confirm.ask("\n  Save Caddy config to ./caddy-mcp.conf?", default=True):
-            with open("caddy-mcp.conf", "w") as f:
-                f.write(caddy_config)
-            console.print("  [green]\u2713[/green] Saved to ./caddy-mcp.conf")
+    if proxy_choice in proxy_configs:
+        filename, generator, panel_title = proxy_configs[proxy_choice]
+        config_file = Path(filename)
 
-    elif proxy_choice == "2":
-        # Nginx
-        nginx_config = generate_nginx_config(domain)
-        console.print("\n[bold]Nginx Configuration:[/bold]")
-        console.print(Panel(nginx_config, title=f"/etc/nginx/sites-available/{domain}"))
-        console.print("\n[bold]To apply:[/bold]")
-        console.print(f"  1. Save to /etc/nginx/sites-available/{domain}")
-        console.print(f"  2. Run: [cyan]sudo ln -s /etc/nginx/sites-available/{domain} /etc/nginx/sites-enabled/[/cyan]")
-        console.print(f"  3. Get SSL cert: [cyan]sudo certbot --nginx -d {domain}[/cyan]")
-        console.print("  4. Run: [cyan]sudo systemctl reload nginx[/cyan]")
+        proxy_config = generator(domain)
 
-        if Confirm.ask("\n  Save Nginx config to ./nginx-mcp.conf?", default=True):
-            with open("nginx-mcp.conf", "w") as f:
-                f.write(nginx_config)
-            console.print("  [green]\u2713[/green] Saved to ./nginx-mcp.conf")
+        if config_file.exists() and config_file.read_text().strip() == proxy_config.strip():
+            console.print(f"\n  [green]\u2713[/green] {filename} already configured for {domain}")
+        else:
+            console.print(f"\n[bold]Configuration:[/bold]")
+            console.print(Panel(proxy_config, title=panel_title))
 
-    elif proxy_choice == "3":
-        # Apache
-        apache_config = generate_apache_config(domain)
-        console.print("\n[bold]Apache Configuration:[/bold]")
-        console.print(Panel(apache_config, title=f"/etc/apache2/sites-available/{domain}.conf"))
-        console.print("\n[bold]To apply:[/bold]")
-        console.print("  1. Enable required modules: [cyan]sudo a2enmod proxy proxy_http ssl[/cyan]")
-        console.print(f"  2. Save to /etc/apache2/sites-available/{domain}.conf")
-        console.print(f"  3. Run: [cyan]sudo a2ensite {domain}[/cyan]")
-        console.print(f"  4. Get SSL cert: [cyan]sudo certbot --apache -d {domain}[/cyan]")
-        console.print("  5. Run: [cyan]sudo systemctl reload apache2[/cyan]")
+            if proxy_choice == "1":
+                console.print("\n[bold]To apply:[/bold]")
+                console.print("  1. Add the above to your Caddyfile")
+                console.print("  2. Run: [cyan]sudo systemctl reload caddy[/cyan]")
+                console.print("\n  Caddy will automatically obtain and renew SSL certificates.")
+            elif proxy_choice == "2":
+                console.print("\n[bold]To apply:[/bold]")
+                console.print(f"  1. Save to /etc/nginx/sites-available/{domain}")
+                console.print(f"  2. Run: [cyan]sudo ln -s /etc/nginx/sites-available/{domain} /etc/nginx/sites-enabled/[/cyan]")
+                console.print(f"  3. Get SSL cert: [cyan]sudo certbot --nginx -d {domain}[/cyan]")
+                console.print("  4. Run: [cyan]sudo systemctl reload nginx[/cyan]")
+            elif proxy_choice == "3":
+                console.print("\n[bold]To apply:[/bold]")
+                console.print("  1. Enable required modules: [cyan]sudo a2enmod proxy proxy_http ssl[/cyan]")
+                console.print(f"  2. Save to /etc/apache2/sites-available/{domain}.conf")
+                console.print(f"  3. Run: [cyan]sudo a2ensite {domain}[/cyan]")
+                console.print(f"  4. Get SSL cert: [cyan]sudo certbot --apache -d {domain}[/cyan]")
+                console.print("  5. Run: [cyan]sudo systemctl reload apache2[/cyan]")
 
-        if Confirm.ask("\n  Save Apache config to ./apache-mcp.conf?", default=True):
-            with open("apache-mcp.conf", "w") as f:
-                f.write(apache_config)
-            console.print("  [green]\u2713[/green] Saved to ./apache-mcp.conf")
+            if Confirm.ask(f"\n  Save config to ./{filename}?", default=True):
+                with open(filename, "w") as f:
+                    f.write(proxy_config)
+                console.print(f"  [green]\u2713[/green] Saved to ./{filename}")
 
     else:
         console.print("\n  Skipping reverse proxy configuration.")
         console.print(f"  Make sure to configure your proxy to forward {config['MCP_PUBLIC_URL']} to localhost:{config['MCP_PORT']}")
 
     # =========================================================================
-    # STEP 7: Systemd Service
+    # STEP 5: Systemd Service
     # =========================================================================
     console.print("\n" + "=" * 60)
-    console.print("[bold cyan]STEP 7: Systemd Service[/bold cyan]")
+    console.print("[bold cyan]STEP 5: Systemd Service[/bold cyan]")
     console.print("=" * 60)
     console.print(
         "\nA systemd service keeps the MCP gateway running and starts it on boot."
     )
 
-    if Confirm.ask("\n  Generate and install systemd service?", default=True):
-        _generate_systemd(env_path)
+    service_file = Path(f"/etc/systemd/system/{SERVICE_NAME}.service")
+    if service_file.exists():
+        paths = detect_paths()
+        expected = generate_systemd_unit(paths, env_path)
+        try:
+            installed = service_file.read_text()
+        except PermissionError:
+            proc = subprocess.run(
+                ["sudo", "cat", str(service_file)],
+                capture_output=True, text=True,
+            )
+            installed = proc.stdout
+
+        if installed.strip() == expected.strip():
+            console.print(f"\n  [green]\u2713[/green] Systemd service already installed and up to date")
+        else:
+            console.print(f"\n  [yellow]![/yellow] Systemd service exists but config has changed")
+            if Confirm.ask("  Regenerate and reinstall?", default=True):
+                _generate_systemd(env_path)
+    else:
+        if Confirm.ask("\n  Generate and install systemd service?", default=True):
+            _generate_systemd(env_path)
 
     # =========================================================================
     # DONE
     # =========================================================================
     console.print("\n" + "=" * 60)
+
+    # Count entities if manifest is available
+    entity_info = ""
+    manifest_path = Path(config["MCP_MANIFEST_PATH"])
+    if manifest_path.exists():
+        try:
+            from .manifest import load_manifest, get_entity_names
+            m = load_manifest(str(manifest_path))
+            entity_info = f"\nEntities: {len(get_entity_names(m))} (from {config['MCP_MANIFEST_PATH']})"
+        except Exception:
+            pass
+
     console.print(
         Panel.fit(
             "[bold green]Setup Complete![/bold green]\n\n"
-            f"Server Name: {config['MCP_SERVER_NAME']}\n"
-            f"Public URL:  {config['MCP_PUBLIC_URL']}\n"
-            f"Local:       {config['MCP_HOST']}:{config['MCP_PORT']}\n\n"
-            "[bold]Next Steps:[/bold]\n"
-            "1. Copy manifest.json.example to manifest.json and customize\n"
-            "2. Configure your reverse proxy (see above)\n"
-            "3. Start the service: [cyan]sudo systemctl start mcp-server[/cyan]\n"
-            "4. Test the connection from UAVCrew dashboard\n\n"
+            f"Server:  {config['MCP_SERVER_NAME']}\n"
+            f"URL:     {config['MCP_PUBLIC_URL']}\n"
+            f"Local:   {config['MCP_HOST']}:{config['MCP_PORT']}"
+            f"{entity_info}\n\n"
+            "[bold]Post-Setup Steps:[/bold]\n\n"
+            "1. Start the gateway:\n"
+            "   [cyan]uavcrew start[/cyan]\n\n"
+            "2. Register a tenant (client API credential):\n"
+            "   [cyan]uavcrew tenants add --tenant-id <org-id> --token <api-key>[/cyan]\n\n"
+            "3. Register this server on UAVCrew.ai:\n"
+            "   [link]https://www.uavcrew.ai/dashboard/mcp/[/link]\n"
+            f"   Enter name: [cyan]{config['MCP_SERVER_NAME']}[/cyan]\n"
+            f"   Enter URL:  [cyan]{config['MCP_PUBLIC_URL']}[/cyan]\n"
+            "   Copy the connection token\n\n"
+            "4. Add the connection token:\n"
+            "   [cyan]uavcrew keys add <token-from-step-3>[/cyan]\n\n"
+            "5. Restart to apply:\n"
+            "   [cyan]uavcrew restart[/cyan]\n\n"
             "[bold]Commands:[/bold]\n"
-            "  [cyan]uavcrew status[/cyan]  - Check status and manifest\n"
-            "  [cyan]sudo journalctl -u mcp-server -f[/cyan]  - View logs",
+            "  [cyan]uavcrew status[/cyan]    - Check health and configuration\n"
+            "  [cyan]uavcrew start[/cyan]     - Start the service\n"
+            "  [cyan]uavcrew restart[/cyan]   - Restart after config changes",
             border_style="green",
         )
     )
