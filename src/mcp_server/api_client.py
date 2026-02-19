@@ -5,6 +5,7 @@ using tenant-specific authentication tokens.
 """
 
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -13,6 +14,26 @@ logger = logging.getLogger(__name__)
 
 # Default timeout for API requests (seconds)
 DEFAULT_TIMEOUT = 30.0
+
+# Maximum length for error details returned to callers
+_MAX_DETAIL_LENGTH = 500
+
+
+def _sanitize_error_details(details: Any) -> Any:
+    """Sanitize error response details.
+
+    Strips HTML tags from error pages, truncates long strings.
+    Leaves dicts (JSON error bodies) unchanged.
+    """
+    if not isinstance(details, str):
+        return details
+    if "<html" in details.lower() or "<body" in details.lower() or "<!doctype" in details.lower():
+        text = re.sub(r"<[^>]+>", " ", details)
+        text = re.sub(r"\s+", " ", text).strip()
+        details = text if text else "HTML error page (no extractable text)"
+    if len(details) > _MAX_DETAIL_LENGTH:
+        details = details[:_MAX_DETAIL_LENGTH] + "..."
+    return details
 
 
 class ApiClient:
@@ -84,6 +105,8 @@ class ApiClient:
                 details = response.json()
             except Exception:
                 details = response.text
+
+            details = _sanitize_error_details(details)
 
             error_msg = f"Client API returned {response.status_code}"
             logger.warning("%s: %s %s → %s", error_msg, method, url, details)
