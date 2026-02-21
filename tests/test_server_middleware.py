@@ -394,3 +394,60 @@ class TestLegacyAPIKeyAuth:
             assert resp.status_code == 200
         finally:
             restore()
+
+
+# ---------------------------------------------------------------------------
+# _agent_headers() unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestAgentHeaders:
+    """Test that _agent_headers() reads from context vars correctly."""
+
+    def test_returns_x_agent_when_claims_present(self):
+        """When T1 claims are set, _agent_headers returns X-Agent header."""
+        import mcp_server.server as srv
+        from mcp_server.auth import DelegationClaims
+
+        claims = DelegationClaims(
+            tenant_id="t-1",
+            org_id="o-1",
+            agent="tucker",
+            scope=["read:aircraft"],
+        )
+        token = srv._current_claims.set(claims)
+        try:
+            result = srv._agent_headers()
+            assert result == {"X-Agent": "tucker"}
+        finally:
+            srv._current_claims.reset(token)
+
+    def test_returns_none_when_no_claims(self):
+        """When no T1 claims (legacy mode), _agent_headers returns None."""
+        import mcp_server.server as srv
+
+        token = srv._current_claims.set(None)
+        try:
+            result = srv._agent_headers()
+            assert result is None
+        finally:
+            srv._current_claims.reset(token)
+
+    def test_returns_correct_agent_for_each_slug(self):
+        """Each agent slug is correctly forwarded."""
+        import mcp_server.server as srv
+        from mcp_server.auth import DelegationClaims
+
+        for slug in ["concord", "tucker", "meridian", "ren", "sterling"]:
+            claims = DelegationClaims(
+                tenant_id="t-1",
+                org_id="o-1",
+                agent=slug,
+                scope=["read:company"],
+            )
+            token = srv._current_claims.set(claims)
+            try:
+                result = srv._agent_headers()
+                assert result == {"X-Agent": slug}
+            finally:
+                srv._current_claims.reset(token)

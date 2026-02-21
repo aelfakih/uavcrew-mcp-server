@@ -88,6 +88,14 @@ def _get_claims() -> DelegationClaims | None:
     return _current_claims.get(None)
 
 
+def _agent_headers() -> dict[str, str] | None:
+    """Build X-Agent header from current claims, if available."""
+    claims = _get_claims()
+    if claims and claims.agent:
+        return {"X-Agent": claims.agent}
+    return None
+
+
 def _check_scope(entity: str, operation: str = "read") -> dict | None:
     """Check if the current agent is authorized for an entity operation.
 
@@ -173,7 +181,7 @@ async def get_entity_fn(entity: str, id: str | None = None) -> dict[str, Any]:
             }
         path = f"{entity_def['path']}/{id}"
 
-    return await _api_client.get(path, token)
+    return await _api_client.get(path, token, extra_headers=_agent_headers())
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +240,7 @@ async def list_entities(
         query["sort"] = sort
 
     path = entity_def["path"]
-    return await _api_client.get(path, token, query=query)
+    return await _api_client.get(path, token, query=query, extra_headers=_agent_headers())
 
 
 # ---------------------------------------------------------------------------
@@ -277,14 +285,15 @@ async def search(
         }
 
     # Use unified search endpoint if available, else per-entity search
+    headers = _agent_headers()
     if entity:
         search_params = {"search": query}
         entity_def = get_entity(_manifest, entity)
         path = entity_def["path"]
-        return await _api_client.get(path, token, query=search_params)
+        return await _api_client.get(path, token, query=search_params, extra_headers=headers)
     else:
         # Unified search across all entities
-        return await _api_client.get("/search", token, query={"q": query})
+        return await _api_client.get("/search", token, query={"q": query}, extra_headers=headers)
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +368,7 @@ async def action(
         path = path.replace("{id}", id)
 
     method = action_def["method"]
-    return await _api_client.request(method, path, token, params=params)
+    return await _api_client.request(method, path, token, params=params, extra_headers=_agent_headers())
 
 
 # ---------------------------------------------------------------------------

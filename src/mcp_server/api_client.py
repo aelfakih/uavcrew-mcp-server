@@ -56,6 +56,7 @@ class ApiClient:
         token: str,
         params: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Make an authenticated HTTP request to the client API.
 
@@ -65,6 +66,7 @@ class ApiClient:
             token: Bearer token for authentication.
             params: JSON body for POST/PATCH/PUT requests.
             query: Query parameters for GET requests.
+            extra_headers: Additional headers to include (e.g., X-Agent).
 
         Returns:
             Standardized response dict:
@@ -77,6 +79,8 @@ class ApiClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        if extra_headers:
+            headers.update(extra_headers)
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
@@ -143,19 +147,31 @@ class ApiClient:
             }
 
     async def get(
-        self, path: str, token: str, query: dict[str, Any] | None = None
+        self,
+        path: str,
+        token: str,
+        query: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """GET request."""
-        return await self.request("GET", path, token, query=query)
+        return await self.request("GET", path, token, query=query, extra_headers=extra_headers)
 
     async def post(
-        self, path: str, token: str, params: dict[str, Any] | None = None
+        self,
+        path: str,
+        token: str,
+        params: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """POST request."""
-        return await self.request("POST", path, token, params=params)
+        return await self.request("POST", path, token, params=params, extra_headers=extra_headers)
 
     async def patch(
-        self, path: str, token: str, params: dict[str, Any] | None = None
+        self,
+        path: str,
+        token: str,
+        params: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """PATCH request."""
-        return await self.request("PATCH", path, token, params=params)
+        return await self.request("PATCH", path, token, params=params, extra_headers=extra_headers)

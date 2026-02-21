@@ -194,3 +194,95 @@ class TestApiClientRequests:
         request = route.calls[0].request
         assert "limit=10" in str(request.url)
         assert "status=active" in str(request.url)
+
+
+class TestExtraHeaders:
+    """Test X-Agent and other extra headers are forwarded to the client API."""
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_get_sends_x_agent_header(self):
+        """X-Agent header is forwarded on GET requests."""
+        client = ApiClient("https://api.example.com")
+
+        route = respx.get("https://api.example.com/pilots").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        await client.get("/pilots", "k4", extra_headers={"X-Agent": "tucker"})
+
+        request = route.calls[0].request
+        assert request.headers["x-agent"] == "tucker"
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_post_sends_x_agent_header(self):
+        """X-Agent header is forwarded on POST requests."""
+        client = ApiClient("https://api.example.com")
+
+        route = respx.post("https://api.example.com/pilots").mock(
+            return_value=httpx.Response(201, json={"id": "P-1"})
+        )
+
+        await client.post(
+            "/pilots", "k4",
+            params={"name": "Test"},
+            extra_headers={"X-Agent": "concord"},
+        )
+
+        request = route.calls[0].request
+        assert request.headers["x-agent"] == "concord"
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_patch_sends_x_agent_header(self):
+        """X-Agent header is forwarded on PATCH requests."""
+        client = ApiClient("https://api.example.com")
+
+        route = respx.patch("https://api.example.com/pilots/P-1").mock(
+            return_value=httpx.Response(200, json={"id": "P-1"})
+        )
+
+        await client.patch(
+            "/pilots/P-1", "k4",
+            params={"name": "Updated"},
+            extra_headers={"X-Agent": "ren"},
+        )
+
+        request = route.calls[0].request
+        assert request.headers["x-agent"] == "ren"
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_no_extra_headers_when_none(self):
+        """No extra headers added when extra_headers is None."""
+        client = ApiClient("https://api.example.com")
+
+        route = respx.get("https://api.example.com/pilots").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        await client.get("/pilots", "k4", extra_headers=None)
+
+        request = route.calls[0].request
+        assert "x-agent" not in request.headers
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_extra_headers_do_not_override_auth(self):
+        """Extra headers cannot override Authorization."""
+        client = ApiClient("https://api.example.com")
+
+        route = respx.get("https://api.example.com/pilots").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+
+        await client.get(
+            "/pilots", "k4",
+            extra_headers={"X-Agent": "sterling", "X-Session": "sess-123"},
+        )
+
+        request = route.calls[0].request
+        assert request.headers["authorization"] == "Bearer k4"
+        assert request.headers["x-agent"] == "sterling"
+        assert request.headers["x-session"] == "sess-123"
